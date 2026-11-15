@@ -18,9 +18,10 @@ Key features:
 
 - Raspberry Pi 5 with AI HAT+ 2 (Hailo-10H NPU)
 - 64-bit Raspberry Pi OS (Trixie)
-- Python 3.10+
-- Hailo driver installed (`hailo-h10-all`)
-- HailoRT Python bindings
+- Python 3.13 on 64-bit Raspberry Pi OS
+- Hailo driver/firmware installed and working with the selected HailoRT version
+- `hailo-device-manager` installed and running
+- `hailo-apps` git submodule initialized (used to locate/download the Whisper HEF)
 - ffmpeg (for audio decoding)
 
 ## Installation
@@ -28,9 +29,15 @@ Key features:
 ### Quick Start
 
 ```bash
-cd /home/gregm/raspberry_pi_hailo_ai_services/system_services/hailo-whisper
-sudo ./install.sh
+cd ~/raspberry_pi_hailo_ai_services
+git submodule update --init --recursive hailo-apps
+cd system_services/hailo-whisper
+
+# Use the same HailoRT wheel/version as the device manager.
+sudo HAILORT_WHEEL_SOURCE=/home/pi/hailort-5.3.0-cp313-cp313-linux_aarch64.whl ./install.sh
 ```
+
+For HailoRT 5.5.0, omit the `HAILORT_WHEEL_SOURCE=...` override and the installer uses its pinned 5.5.0 wheel.
 
 This will:
 - Create `hailo-whisper` system user and group
@@ -51,6 +58,27 @@ sudo ./install.sh --warmup-model
 ```bash
 ./verify.sh
 ```
+
+### Smoke test
+
+Check service readiness and model discovery:
+
+```bash
+curl -fsS http://localhost:11437/health
+curl -fsS http://localhost:11437/health/ready
+curl -fsS http://localhost:11437/v1/models
+```
+
+Transcribe a short speech recording (the upload must be `multipart/form-data`):
+
+```bash
+curl -sS http://localhost:11437/v1/audio/transcriptions \
+  -F file=@/path/to/short-speech.wav \
+  -F model=Whisper-Base \
+  -F response_format=json
+```
+
+Expect a JSON response containing a `text` field. If installation or inference fails, inspect `sudo journalctl -u hailo-whisper -n 100 --no-pager` and `sudo journalctl -u hailo-device-manager -n 100 --no-pager`.
 
 ## Configuration
 

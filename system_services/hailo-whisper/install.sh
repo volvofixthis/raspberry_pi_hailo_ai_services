@@ -25,6 +25,7 @@ RENDER_SCRIPT="${SCRIPT_DIR}/render_config.py"
 DEFAULT_PORT="11437"
 SERVER_SCRIPT="${SCRIPT_DIR}/hailo_whisper_server.py"
 REQUIREMENTS_SRC="${SCRIPT_DIR}/requirements.txt"
+HAILORT_WHEEL_SOURCE="${HAILORT_WHEEL_SOURCE:-https://dev-public.hailo.ai/2026_10/Hailo10/hailort-5.5.0-cp313-cp313-linux_aarch64.whl}"
 
 WARMUP_MODEL=""
 
@@ -82,7 +83,7 @@ preflight_hailo() {
 }
 
 preflight_hailort() {
-    if ! python3 - <<'PY' >/dev/null 2>&1
+    if python3 - <<'PY' >/dev/null 2>&1
 try:
     import hailo_platform
     print("OK")
@@ -90,9 +91,9 @@ except ImportError:
     raise
 PY
     then
-        error "HailoRT Python bindings (hailo_platform) not found in system site-packages."
-        error "Install with: sudo apt install python3-h10-hailort"
-        exit 1
+        log "System HailoRT Python bindings are available"
+    else
+        log "System HailoRT Python bindings are absent; the configured wheel will be installed in the service venv"
     fi
 }
 
@@ -127,6 +128,8 @@ create_state_directories() {
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${DATA_DIR}"
     chmod -R u+rwX,g+rX,o-rwx "${DATA_DIR}"
     chmod 0755 "${DATA_DIR}"
+    chown -R "${SERVICE_USER}:hailo-device-mgr" "${RESOURCES_DIR}"
+    chmod -R u+rwX,g+rX,o-rwx "${RESOURCES_DIR}"
 
     cp "${SERVER_SCRIPT}" "${SERVICE_DIR}/"
     cp "${RENDER_SCRIPT}" "${SERVICE_DIR}/"
@@ -141,6 +144,19 @@ create_venv() {
     log "Creating Python virtual environment with system site packages"
     rm -rf "${VENV_DIR}"
     python3 -m venv --system-site-packages "${VENV_DIR}"
+    if [[ -f "${HAILORT_WHEEL_SOURCE}" ]]; then
+        log "Installing local HailoRT wheel ${HAILORT_WHEEL_SOURCE} into venv"
+    elif [[ "${HAILORT_WHEEL_SOURCE}" =~ ^https?:// ]]; then
+        log "Installing HailoRT wheel ${HAILORT_WHEEL_SOURCE} into venv"
+    else
+        error "HAILORT_WHEEL_SOURCE must be an existing wheel file or an HTTP(S) URL: ${HAILORT_WHEEL_SOURCE}"
+        exit 1
+    fi
+    "${VENV_DIR}/bin/pip" install --quiet "${HAILORT_WHEEL_SOURCE}"
+    if ! "${VENV_DIR}/bin/python3" -c "import hailo_platform" >/dev/null 2>&1; then
+        error "HailoRT Python bindings are not importable from the Whisper venv after wheel installation."
+        exit 1
+    fi
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${VENV_DIR}"
 }
 
@@ -267,7 +283,8 @@ ensure_model_downloaded() {
         --include-gen-ai \
         --no-parallel
 
-    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${RESOURCES_DIR}"
+    chown -R "${SERVICE_USER}:hailo-device-mgr" "${RESOURCES_DIR}"
+    chmod -R u+rwX,g+rX,o-rwx "${RESOURCES_DIR}"
 }
 
 install_unit() {
