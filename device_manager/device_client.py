@@ -24,6 +24,7 @@ import logging
 import os
 import struct
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -32,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SOCKET_PATH = "/run/hailo/device.sock"
 DEFAULT_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+
+
+class DeviceManagerError(RuntimeError):
+    """Manager returned a structured request error."""
+
+    def __init__(self, payload: Any) -> None:
+        self.payload = payload
+        super().__init__(f"Device manager error: {payload}")
 
 
 async def _read_exact(reader: asyncio.StreamReader, size: int) -> Optional[bytes]:
@@ -176,7 +185,7 @@ class HailoDeviceClient:
                     raise RuntimeError("Mismatched response request_id")
 
                 if "error" in response:
-                    raise RuntimeError(f"Device manager error: {response['error']}")
+                    raise DeviceManagerError(response["error"])
 
                 return response
 
@@ -193,6 +202,38 @@ class HailoDeviceClient:
     async def device_status(self) -> Dict[str, Any]:
         """Get device status info from the device manager."""
         return await self._send_request({"action": "device_status"})
+
+    async def model_info(
+        self,
+        model_path: str,
+        model_type: str = "llm",
+        model_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Get metadata for a loaded LLM model without loading it."""
+        request: Dict[str, Any] = {
+            "action": "model_info",
+            "model_path": str(model_path),
+            "model_type": model_type,
+        }
+        if model_params:
+            request["model_params"] = model_params
+        return await self._send_request(request)
+
+    async def clear_context(
+        self,
+        model_path: str,
+        model_type: str = "llm",
+        model_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Clear the runtime context for a loaded model; this does not unload it."""
+        request: Dict[str, Any] = {
+            "action": "clear_context",
+            "model_path": str(model_path),
+            "model_type": model_type,
+        }
+        if model_params:
+            request["model_params"] = model_params
+        return await self._send_request(request)
     
     async def load_model(
         self,
@@ -223,7 +264,12 @@ class HailoDeviceClient:
         return await self._send_request(request)
     
     async def infer(
-        self, model_path: str, input_data: Any, model_type: str = "vlm", model_params: Optional[Dict[str, Any]] = None
+        self,
+        model_path: str,
+        input_data: Any,
+        model_type: str = "vlm",
+        model_params: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run inference with a model.
@@ -247,11 +293,69 @@ class HailoDeviceClient:
         }
         if model_params:
             request["model_params"] = model_params
+        if model_id:
+            request["model_id"] = model_id
         
         return await self._send_request(request)
+
+    async def infer_stream(
+        self,
+        model_path: str,
+        input_data: Any,
+        model_type: str = "llm",
+        model_params: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Stream manager inference events while holding the request lock."""
+        async with self._lock:
+            if not self.writer:
+                await self.connect()
+
+            request_id = str(uuid.uuid4())
+            request: Dict[str, Any] = {
+                "action": "infer_stream",
+                "model_path": str(model_path),
+                "model_type": model_type,
+                "input_data": input_data,
+                "request_id": request_id,
+            }
+            if model_params:
+                request["model_params"] = model_params
+            if model_id:
+                request["model_id"] = model_id
+
+            complete = False
+            try:
+                await _write_message(self.writer, request, self.max_message_bytes)
+                while True:
+                    response = await asyncio.wait_for(
+                        _read_message(self.reader, self.max_message_bytes),
+                        timeout=self.timeout,
+                    )
+                    if response is None:
+                        raise RuntimeError("Device manager stream closed")
+                    if response.get("request_id") != request_id:
+                        raise RuntimeError("Mismatched response request_id")
+                    event = response.get("event")
+                    if event == "error":
+                        complete = True
+                        raise DeviceManagerError(response.get("error", "unknown error"))
+                    if event not in {"token", "final"}:
+                        raise RuntimeError(f"Unexpected streaming response event: {event}")
+                    if event == "final":
+                        complete = True
+                    yield response
+                    if event == "final":
+                        return
+            finally:
+                if not complete:
+                    await self.disconnect()
     
     async def unload_model(
-        self, model_path: str, model_type: str = "vlm"
+        self,
+        model_path: str,
+        model_type: str = "vlm",
+        model_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Unload a model from the device.
@@ -262,13 +366,14 @@ class HailoDeviceClient:
         Returns:
             Response dict with 'status' and 'message'
         """
-        return await self._send_request(
-            {
-                "action": "unload_model",
-                "model_path": str(model_path),
-                "model_type": model_type,
-            }
-        )
+        request: Dict[str, Any] = {
+            "action": "unload_model",
+            "model_path": str(model_path),
+            "model_type": model_type,
+        }
+        if model_params:
+            request["model_params"] = model_params
+        return await self._send_request(request)
 
 
 def create_client(socket_path: Optional[str] = None) -> HailoDeviceClient:

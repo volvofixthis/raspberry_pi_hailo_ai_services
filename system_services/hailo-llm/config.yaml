@@ -1,0 +1,31 @@
+server:
+  host: 0.0.0.0
+  port: 11441
+
+default_model: qwen2.5-1.5b
+
+# Used when a model has no per-model max_tokens setting.
+generation:
+  max_tokens: 128
+  temperature: 0.0
+  do_sample: false
+
+# These IDs are the only model values accepted by the HTTP API.
+# Place the corresponding HEF artifacts at the configured paths before inference.
+models:
+  qwen2.5-1.5b:
+    hef_path: /var/lib/hailo-llm/models/qwen2.5-1.5b.hef
+    lora_name: null
+    supports_tools: false
+  qwen2.5-coder-1.5b:
+    hef_path: /var/lib/hailo-llm/models/qwen2.5-coder-1.5b.hef
+    lora_name: null
+    supports_tools: true
+    generation:
+      temperature: 0.2
+      do_sample: true
+      max_tokens: 256
+
+device_manager:
+  status_url: http://127.0.0.1:5099/v1/device/status
+  timeout_s: 120

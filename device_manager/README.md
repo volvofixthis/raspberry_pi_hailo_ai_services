@@ -57,8 +57,8 @@ there are not enough free devices. requested: 1, found: 0
 
 ## Prerequisites
 
-- Hailo driver installed: `sudo apt install dkms hailo-h10-all`
-- HailoRT Python bindings: `sudo apt install python3-h10-hailort`
+- Hailo driver/runtime installed for the Pi and AI HAT+ 2 (for current Raspberry Pi OS images, install the matching `hailo-all` package)
+- The manager installer installs its pinned HailoRT Python wheel into `/opt/hailo-device-manager/venv`; a system-wide `hailo_platform` module is not required
 - Verify: `hailortcli fw-control identify`
 
 ## Installation
@@ -189,6 +189,7 @@ Remove model from device memory:
 Currently supported `model_type` values:
 - `vlm` (Hailo GenAI VLM via `hailo_platform.genai.VLM`)
 - `vlm_chat` (VLM chat via `VLM.generate_all`)
+- `llm` (Hailo GenAI LLM via the manager-owned VDevice; supports context metadata and token streaming)
 - `clip` (CLIP image/text encoders via `create_infer_model`)
 
 Add new model types by extending the handler registry in

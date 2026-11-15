@@ -77,8 +77,11 @@ Manufacturer-provided Hailo applications repackaged as persistent systemd servic
 | **hailo-tracking** | STARK single-target and ByteTrack-style pedestrian video tracking | 🧪 Experimental | 11443 | Custom |
 | **hailo-piper** | Text-to-speech (Piper TTS) | ✅ Production | 5003 | OpenAI TTS API |
 | **hailo-ollama** | LLM inference (Qwen2.5-1.5B) | ⚠️ Production | 11434 | Ollama API |
+| **hailo-llm** | Configurable Hailo GenAI LLMs via the shared device manager | 🧪 Experimental | 11441 | OpenAI Chat API |
 
 **⚠️ Exception: hailo-ollama** uses a precompiled binary that doesn't support the device manager architecture. It requires exclusive device access and cannot run concurrently with other services.
+
+`hailo-llm` is the manager-integrated LLM API. It serves configured model IDs at `/v1/chat/completions`, supports SSE streaming, and queues inference through `hailo-device-manager`. See [Hailo LLM Service](system_services/hailo-llm/README.md).
 
 Each service includes:
 - Full API specification (`API_SPEC.md`)

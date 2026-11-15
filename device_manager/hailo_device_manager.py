@@ -28,7 +28,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +63,12 @@ except ImportError as e:
     logger.error("Missing dependency: %s", e)
     logger.error("Install with: sudo apt install python3-h10-hailort")
     sys.exit(1)
+
+try:
+    from hailo_platform.genai import LLM
+except ImportError:
+    # Keep existing non-LLM services available on HailoRT builds without GenAI LLM support.
+    LLM = None
 
 try:
     from hailo_apps.python.core.common.defines import SHARED_VDEVICE_GROUP_ID
@@ -151,6 +157,7 @@ class ModelEntry:
     model: Any
     loaded_at: float
     last_used: float
+    model_params: Dict[str, Any] = field(default_factory=dict)
 
 
 class ModelHandler:
@@ -164,9 +171,30 @@ class ModelHandler:
     def infer(self, model: Any, input_data: Any) -> Any:
         raise NotImplementedError
 
+    def stream(self, model: Any, input_data: Any):
+        raise ValueError(f"Streaming is not supported for model_type={self.model_type}")
+
     def unload(self, model: Any) -> None:
         if hasattr(model, "release"):
             model.release()
+
+
+class ContextOverflowError(ValueError):
+    def __init__(
+        self,
+        context_used: int,
+        estimated_prompt_tokens: int,
+        max_generated_tokens: int,
+        context_max: int,
+    ) -> None:
+        self.payload = {
+            "type": "context_overflow",
+            "context_used": context_used,
+            "estimated_prompt_tokens": estimated_prompt_tokens,
+            "max_generated_tokens": max_generated_tokens,
+            "context_max": context_max,
+        }
+        super().__init__(json.dumps(self.payload))
 
 
 class VlmHandler(ModelHandler):
@@ -210,6 +238,90 @@ class VlmChatHandler(ModelHandler):
             )
         finally:
             model.clear_context()
+
+
+class LlmHandler(ModelHandler):
+    """Hailo GenAI LLM handler, always called from the manager's serialized worker."""
+
+    model_type = "llm"
+    STOP_TOKENS = frozenset({"<|im_end|>", "<|endoftext|>"})
+
+    def load(
+        self, vdevice: hailo_platform.VDevice, model_path: str, model_params: Dict[str, Any]
+    ) -> Any:
+        if LLM is None:
+            raise RuntimeError("This HailoRT installation does not provide GenAI LLM support")
+        lora_name = model_params.get("lora_name")
+        kwargs = {"lora_name": lora_name} if lora_name else {}
+        return LLM(vdevice, model_path, **kwargs)
+
+    def metadata(self, model: Any) -> Dict[str, Any]:
+        return {
+            "prompt_template": model.prompt_template(),
+            "context_capacity": int(model.max_context_capacity()),
+        }
+
+    @staticmethod
+    def _generation_kwargs(input_data: Dict[str, Any]) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        max_tokens = input_data.get("max_generated_tokens")
+        if max_tokens is not None:
+            kwargs["max_generated_tokens"] = int(max_tokens)
+        if "do_sample" in input_data:
+            kwargs["do_sample"] = bool(input_data["do_sample"])
+        elif input_data.get("temperature") is not None:
+            # The supported GenAI LLM API exposes sampling as a boolean.
+            kwargs["do_sample"] = float(input_data["temperature"]) > 0
+        return kwargs
+
+    @staticmethod
+    def _check_context(model: Any, prompt: str, input_data: Dict[str, Any]) -> None:
+        context_used = int(model.get_context_usage_size())
+        prompt_tokens = max(1, len(prompt) // 4)
+        max_generated_tokens = int(input_data.get("max_generated_tokens") or 512)
+        context_max = int(model.max_context_capacity())
+        if context_used + prompt_tokens + max_generated_tokens > context_max:
+            raise ContextOverflowError(
+                context_used,
+                prompt_tokens,
+                max_generated_tokens,
+                context_max,
+            )
+
+    def infer(self, model: Any, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = input_data.get("prompt")
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("prompt is required for llm inference")
+
+        model.clear_context()
+        try:
+            self._check_context(model, prompt, input_data)
+            text = model.generate_all(prompt, **self._generation_kwargs(input_data))
+            return {
+                "text": text,
+                "context_used": int(model.get_context_usage_size()),
+                "context_capacity": int(model.max_context_capacity()),
+            }
+        finally:
+            model.clear_context()
+
+    def stream(self, model: Any, input_data: Dict[str, Any]):
+        prompt = input_data.get("prompt")
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("prompt is required for llm inference")
+
+        model.clear_context()
+        try:
+            self._check_context(model, prompt, input_data)
+            with model.generate(prompt, **self._generation_kwargs(input_data)) as tokens:
+                for token in tokens:
+                    if token not in self.STOP_TOKENS:
+                        yield token
+        finally:
+            model.clear_context()
+
+    def clear_context(self, model: Any) -> None:
+        model.clear_context()
 
 
 @dataclass
@@ -959,9 +1071,12 @@ class HailoDeviceManager:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._request_queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
+        self._active_inference: Optional[Dict[str, Any]] = None
+        self._active_inference_lock = threading.Lock()
         self._handlers = {
             VlmHandler.model_type: VlmHandler(),
             VlmChatHandler.model_type: VlmChatHandler(),
+            LlmHandler.model_type: LlmHandler(),
             ClipHandler.model_type: ClipHandler(),
             WhisperHandler.model_type: WhisperHandler(),
             OcrHandler.model_type: OcrHandler(),
@@ -1121,13 +1236,31 @@ class HailoDeviceManager:
             if item is None:
                 self._request_queue.task_done()
                 break
-            request, future = item
+            if len(item) == 2:
+                request, future = item
+                stream_queue = None
+            else:
+                request, future, stream_queue = item
             try:
-                response = await loop.run_in_executor(
-                    self._executor, self._handle_request_sync, request
-                )
+                if stream_queue is None:
+                    response = await loop.run_in_executor(
+                        self._executor, self._handle_request_sync, request
+                    )
+                else:
+                    response = await loop.run_in_executor(
+                        self._executor,
+                        self._handle_stream_request_sync,
+                        request,
+                        loop,
+                        stream_queue,
+                    )
             except Exception as e:
                 response = {"error": f"Internal error: {e}"}
+                if stream_queue is not None:
+                    loop.call_soon_threadsafe(
+                        stream_queue.put_nowait,
+                        {"event": "error", "error": response["error"]},
+                    )
             future.set_result(response)
             self._request_queue.task_done()
             self._queue_depth = max(0, self._queue_depth - 1)
@@ -1169,8 +1302,11 @@ class HailoDeviceManager:
                 if request is None:
                     break
 
-                response = await self.process_request(request)
-                await write_message(writer, response, self.max_message_bytes)
+                if request.get("action") == "infer_stream":
+                    await self.process_stream_request(request, writer)
+                else:
+                    response = await self.process_request(request)
+                    await write_message(writer, response, self.max_message_bytes)
         except ValueError as e:
             logger.warning("Client %s protocol error: %s", client_id, e)
             try:
@@ -1203,9 +1339,28 @@ class HailoDeviceManager:
     async def _enqueue_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        await self._request_queue.put((request, future))
+        await self._request_queue.put((request, future, None))
         self._queue_depth += 1
         return await future
+
+    async def process_stream_request(
+        self, request: Dict[str, Any], writer: asyncio.StreamWriter
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        stream_queue: asyncio.Queue = asyncio.Queue()
+        request_id = request.get("request_id")
+        await self._request_queue.put((request, future, stream_queue))
+        self._queue_depth += 1
+
+        while True:
+            event = await stream_queue.get()
+            if request_id is not None:
+                event["request_id"] = request_id
+            await write_message(writer, event, self.max_message_bytes)
+            if event.get("event") in {"final", "error"}:
+                await future
+                return
 
     def _handle_request_sync(self, request: Dict[str, Any]) -> Dict[str, Any]:
         action = request.get("action")
@@ -1215,6 +1370,10 @@ class HailoDeviceManager:
             return self._status_payload(include_models=True)
         if action == "device_status":
             return self._device_status_payload()
+        if action == "model_info":
+            return self._model_info(request)
+        if action == "clear_context":
+            return self._clear_context(request)
         if action == "load_model":
             return self._load_model(request)
         if action == "infer":
@@ -1222,6 +1381,67 @@ class HailoDeviceManager:
         if action == "unload_model":
             return self._unload_model(request)
         return {"error": f"Unknown action: {action}"}
+
+    def _handle_stream_request_sync(
+        self,
+        request: Dict[str, Any],
+        loop: asyncio.AbstractEventLoop,
+        stream_queue: asyncio.Queue,
+    ) -> Dict[str, Any]:
+        def emit(event: Dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(stream_queue.put_nowait, event)
+
+        model_path = request.get("model_path")
+        model_type = request.get("model_type", "llm")
+        input_data = request.get("input_data")
+        start_time = time.monotonic()
+        active = False
+        terminal_event: Optional[Dict[str, Any]] = None
+        try:
+            if not model_path or input_data is None:
+                raise ValueError("model_path and input_data required")
+
+            model_params = request.get("model_params") or {}
+            key = self._model_key(model_type, model_path, model_params)
+            if key not in self.loaded_models:
+                load_result = self._load_model(
+                    {
+                        "model_path": model_path,
+                        "model_type": model_type,
+                        "model_params": model_params,
+                    }
+                )
+                if load_result.get("error"):
+                    raise RuntimeError(load_result["error"])
+
+            entry = self.loaded_models[key]
+            handler = self._get_handler(model_type)
+            self._begin_inference(request)
+            active = True
+            token_count = 0
+            for token in handler.stream(entry.model, input_data):
+                token_count += 1
+                emit({"event": "token", "token": token})
+            entry.last_used = time.time()
+            terminal_event = {
+                "event": "final",
+                "status": "ok",
+                "completion_tokens": token_count,
+                "inference_time_ms": int((time.monotonic() - start_time) * 1000),
+            }
+            return {"status": "ok", "completion_tokens": token_count}
+        except Exception as e:
+            logger.error("Streamed inference failed: %s", e)
+            error_payload = e.payload if isinstance(e, ContextOverflowError) else str(e)
+            if self._is_runtime_context_failure(e):
+                self._reset_after_runtime_failure(model_path, "stream inference", e)
+            terminal_event = {"event": "error", "error": error_payload}
+            return {"error": error_payload}
+        finally:
+            if active:
+                self._end_inference()
+            if terminal_event is not None:
+                emit(terminal_event)
 
     def _status_payload(self, include_models: bool) -> Dict[str, Any]:
         models = []
@@ -1231,6 +1451,7 @@ class HailoDeviceManager:
                     {
                         "model_type": entry.model_type,
                         "model_path": entry.model_path,
+                        "model_params": entry.model_params,
                         "loaded_at": entry.loaded_at,
                         "last_used": entry.last_used,
                     }
@@ -1243,6 +1464,7 @@ class HailoDeviceManager:
             "uptime_seconds": time.time() - self.start_time,
             "socket_path": self.socket_path,
             "queue_depth": self._queue_depth,
+            "active_inference": self._active_inference_snapshot(),
             "total_lru_evictions": self._total_evictions,
             "runtime_broken_reason": self._runtime_broken_reason,
             "last_capacity_event_reason": self._last_capacity_event_reason,
@@ -1285,6 +1507,7 @@ class HailoDeviceManager:
                     "name": Path(entry.model_path).name,
                     "model_type": entry.model_type,
                     "model_path": entry.model_path,
+                    "model_params": entry.model_params,
                     "loaded_at": entry.loaded_at,
                     "last_used": entry.last_used,
                 }
@@ -1300,12 +1523,32 @@ class HailoDeviceManager:
             "networks": networks,
             "uptime_seconds": time.time() - self.start_time,
             "queue_depth": self._queue_depth,
+            "active_inference": self._active_inference_snapshot(),
             "total_lru_evictions": self._total_evictions,
             "runtime_broken_reason": self._runtime_broken_reason,
             "last_capacity_event_reason": self._last_capacity_event_reason,
             "last_capacity_event_model": self._last_capacity_event_model,
             "last_capacity_event_at": self._last_capacity_event_at,
         }
+
+    def _active_inference_snapshot(self) -> Optional[Dict[str, Any]]:
+        with self._active_inference_lock:
+            return dict(self._active_inference) if self._active_inference is not None else None
+
+    def _begin_inference(self, request: Dict[str, Any]) -> None:
+        snapshot = {
+            "request_id": request.get("request_id"),
+            "model_id": request.get("model_id"),
+            "model_type": request.get("model_type", "vlm"),
+            "model_path": request.get("model_path"),
+            "started_at": time.time(),
+        }
+        with self._active_inference_lock:
+            self._active_inference = snapshot
+
+    def _end_inference(self) -> None:
+        with self._active_inference_lock:
+            self._active_inference = None
 
     def _start_http_server(self) -> None:
         if not self.http_bind:
@@ -1372,8 +1615,16 @@ class HailoDeviceManager:
             raise ValueError(f"Unsupported model_type: {model_type}")
         return handler
 
-    def _model_key(self, model_type: str, model_path: str) -> str:
-        return f"{model_type}:{model_path}"
+    def _model_key(
+        self,
+        model_type: str,
+        model_path: str,
+        model_params: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        suffix = ""
+        if model_type == "llm" and model_params:
+            suffix = ":" + json.dumps(model_params, sort_keys=True, separators=(",", ":"))
+        return f"{model_type}:{model_path}{suffix}"
 
     def _record_capacity_event(self, reason: str, model: Optional[str] = None) -> None:
         self._last_capacity_event_reason = reason
@@ -1469,7 +1720,7 @@ class HailoDeviceManager:
             if model_type != "clip":
                 return {"error": f"Model file not found: {model_path}"}
 
-        key = self._model_key(model_type, model_path)
+        key = self._model_key(model_type, model_path, model_params)
         if key in self.loaded_models:
             response = {
                 "status": "ok",
@@ -1482,6 +1733,10 @@ class HailoDeviceManager:
                 response["model_info"] = {
                     "detection_input_shape": list(runtime.detection_input_shape),
                 }
+            elif model_type == "llm":
+                response["model_info"] = self._get_handler(model_type).metadata(
+                    self.loaded_models[key].model
+                )
             return response
 
         evictions = 0
@@ -1513,6 +1768,7 @@ class HailoDeviceManager:
                     model=model,
                     loaded_at=now,
                     last_used=now,
+                    model_params=dict(model_params),
                 )
                 response = {
                     "status": "ok",
@@ -1524,6 +1780,8 @@ class HailoDeviceManager:
                     response["model_info"] = {
                         "detection_input_shape": list(model.detection_input_shape),
                     }
+                elif model_type == "llm":
+                    response["model_info"] = handler.metadata(model)
                 return response
             except Exception as e:
                 if self._is_resource_exhausted(e) and evictions < eviction_limit:
@@ -1619,12 +1877,13 @@ class HailoDeviceManager:
             return {"error": "model_path and input_data required"}
 
         try:
-            key = self._model_key(model_type, model_path)
+            model_params = request.get("model_params") or {}
+            key = self._model_key(model_type, model_path, model_params)
             if key not in self.loaded_models:
                 load_result = self._load_model({
                     "model_path": model_path,
                     "model_type": model_type,
-                    "model_params": request.get("model_params") or {},
+                    "model_params": model_params,
                 })
                 if load_result.get("error"):
                     return load_result
@@ -1633,7 +1892,11 @@ class HailoDeviceManager:
             handler = self._get_handler(model_type)
             logger.info("Running inference with %s (%s)", model_path, model_type)
             start_time = time.time()
-            result = handler.infer(entry.model, input_data)
+            self._begin_inference(request)
+            try:
+                result = handler.infer(entry.model, input_data)
+            finally:
+                self._end_inference()
             inference_time_ms = int((time.time() - start_time) * 1000)
             entry.last_used = time.time()
             return {
@@ -1643,9 +1906,52 @@ class HailoDeviceManager:
             }
         except Exception as e:
             logger.error("Inference failed: %s", e)
+            if isinstance(e, ContextOverflowError):
+                return {"error": e.payload}
             if self._is_runtime_context_failure(e):
                 self._reset_after_runtime_failure(model_path, "inference", e)
             return {"error": f"Inference failed: {e}"}
+
+    def _model_info(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        model_path = request.get("model_path")
+        model_type = request.get("model_type", "llm")
+        if not model_path:
+            return {"error": "model_path required"}
+        model_params = request.get("model_params") or {}
+        key = self._model_key(model_type, model_path, model_params)
+        entry = self.loaded_models.get(key)
+        if entry is None:
+            return {
+                "status": "not_loaded",
+                "model_type": model_type,
+                "model_path": model_path,
+            }
+        if model_type != "llm":
+            return {"error": "model_info is supported only for llm models"}
+        handler = self._get_handler(model_type)
+        metadata = handler.metadata(entry.model)
+        metadata["context_used"] = int(entry.model.get_context_usage_size())
+        return {
+            "status": "ok",
+            "model_type": model_type,
+            "model_path": model_path,
+            "model_info": metadata,
+        }
+
+    def _clear_context(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        model_path = request.get("model_path")
+        model_type = request.get("model_type", "llm")
+        if not model_path:
+            return {"error": "model_path required"}
+        if model_type != "llm":
+            return {"error": "clear_context is supported only for llm models"}
+        model_params = request.get("model_params") or {}
+        key = self._model_key(model_type, model_path, model_params)
+        entry = self.loaded_models.get(key)
+        if entry is None:
+            return {"status": "ok", "loaded": False, "message": "Context already clear"}
+        self._get_handler(model_type).clear_context(entry.model)
+        return {"status": "ok", "loaded": True, "model_path": model_path}
 
     def _unload_model(self, request: Dict[str, Any]) -> Dict[str, Any]:
         model_path = request.get("model_path")
@@ -1653,7 +1959,8 @@ class HailoDeviceManager:
         if not model_path:
             return {"error": "model_path required"}
 
-        key = self._model_key(model_type, model_path)
+        model_params = request.get("model_params") or {}
+        key = self._model_key(model_type, model_path, model_params)
         entry = self.loaded_models.get(key)
         if not entry:
             return {"status": "ok", "message": "Model was not loaded"}

@@ -52,7 +52,7 @@ connect via Unix socket and submit JSON requests.
 
 - Location: `/run/hailo/device.sock`
 - Protocol: length-prefixed JSON over Unix socket
-- Supports: `ping`, `status`, `load_model`, `infer`, `unload_model`
+- Supports: `ping`, `status`, `load_model`, `infer`, `infer_stream`, `model_info`, `clear_context`, `unload_model`
 
 ### Request Serialization
 
@@ -62,7 +62,7 @@ connect via Unix socket and submit JSON requests.
 
 ### Model Registry
 
-- Cache key: `model_type:model_path`
+- Cache key: `model_type:model_path` (LLM entries also include model parameters such as LoRA selection)
 - Cache entries track load time and last use
 - Load-on-demand for `infer` if not present
 
@@ -70,7 +70,10 @@ connect via Unix socket and submit JSON requests.
 
 - `vlm`: Hailo GenAI VLM
 - `vlm_chat`: VLM chat using `generate_all`
+- `llm`: Hailo GenAI LLM, with context metadata, context clearing, and token streaming
 - `clip`: image and text encoders using `create_infer_model`
+
+The direct HTTP status endpoint (`GET /v1/device/status`) includes `active_inference` while the worker is running an inference. It reports the request ID, public model ID when supplied, model type, model path, and start time. Status snapshots are served out-of-band so they remain readable during a stream.
 
 Add new model types by extending the handler registry in the manager.
 

@@ -68,7 +68,7 @@ preflight_hailo() {
 }
 
 preflight_hailo_hailort() {
-    if ! python3 - <<'PY' >/dev/null 2>&1
+    if python3 - <<'PY' >/dev/null 2>&1
 try:
     import hailo_platform
     print("OK")
@@ -76,11 +76,9 @@ except ImportError:
     raise
 PY
     then
-        error "HailoRT Python bindings (hailo_platform) not found in system site-packages."
-        error ""
-        error "Ensure python3-h10-hailort is installed:"
-        error "  sudo apt install python3-h10-hailort"
-        exit 1
+        log "System HailoRT Python bindings are available"
+    else
+        log "System HailoRT Python bindings are absent; the pinned wheel will be installed in the manager venv"
     fi
 }
 
@@ -106,6 +104,11 @@ create_venv() {
     python3 -m venv --system-site-packages "${SERVICE_DIR}/venv"
     log "Installing hailort Python wheel into venv"
     "${SERVICE_DIR}/venv/bin/pip" install --quiet "${HAILORT_WHEEL_URL}"
+    if ! "${SERVICE_DIR}/venv/bin/python3" -c "import hailo_platform" >/dev/null 2>&1; then
+        error "HailoRT Python bindings are not importable from the manager venv after wheel installation."
+        error "Check that this Pi's Python ABI matches the configured wheel: ${HAILORT_WHEEL_URL}"
+        exit 1
+    fi
     chown -R root:root "${SERVICE_DIR}/venv"
 }
 

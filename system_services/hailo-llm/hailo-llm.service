@@ -1,0 +1,34 @@
+[Unit]
+Description=Hailo OpenAI-Compatible LLM API
+After=network-online.target hailo-device-manager.service
+Wants=network-online.target hailo-device-manager.service
+
+[Service]
+Type=simple
+User=hailo-llm
+Group=hailo-llm
+WorkingDirectory=/var/lib/hailo-llm
+StateDirectory=hailo-llm
+
+Environment=XDG_CONFIG_HOME=/etc/xdg
+Environment=XDG_DATA_HOME=/var/lib
+Environment=PYTHONUNBUFFERED=1
+Environment=HAILO_DEVICE_SOCKET=/run/hailo/device.sock
+EnvironmentFile=-/etc/hailo/hailo-llm.env
+
+ExecStart=/opt/hailo-llm/venv/bin/python3 /opt/hailo-llm/hailo_llm_server.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+MemoryMax=1G
+CPUQuota=80%
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/hailo-llm /etc/xdg/hailo-llm
+
+[Install]
+WantedBy=multi-user.target
