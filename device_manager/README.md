@@ -69,6 +69,16 @@ cd /home/gregm/raspberry_pi_hailo_ai_services/device_manager
 sudo ./install.sh
 ```
 
+The installer defaults to the HailoRT 5.5.0 wheel. To use a local wheel matching
+an existing runtime, pass its path through `HAILORT_WHEEL_SOURCE`; for example:
+
+```bash
+sudo HAILORT_WHEEL_SOURCE=/home/pi/hailort-5.3.0-cp313-cp313-linux_aarch64.whl ./install.sh
+```
+
+The wheel's Python ABI and architecture must match the Pi, and its HailoRT
+version must be compatible with the installed driver/firmware and model HEFs.
+
 This will:
 1. Create system user `hailo-device-mgr`
 2. Set up Python virtual environment

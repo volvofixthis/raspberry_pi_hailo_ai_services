@@ -94,19 +94,26 @@ create_user_group() {
     fi
 }
 
-# HailoRT Python wheel — installed per-venv from the public Hailo-10H release.
-HAILORT_WHEEL_URL="https://dev-public.hailo.ai/2026_10/Hailo10/hailort-5.5.0-cp313-cp313-linux_aarch64.whl"
+# HailoRT Python wheel — can be overridden with a local wheel path or URL.
+HAILORT_WHEEL_SOURCE="${HAILORT_WHEEL_SOURCE:-https://dev-public.hailo.ai/2026_10/Hailo10/hailort-5.5.0-cp313-cp313-linux_aarch64.whl}"
 
 create_venv() {
     log "Creating Python virtual environment with system site packages"
     mkdir -p "${SERVICE_DIR}"
     rm -rf "${SERVICE_DIR}/venv"
     python3 -m venv --system-site-packages "${SERVICE_DIR}/venv"
-    log "Installing hailort Python wheel into venv"
-    "${SERVICE_DIR}/venv/bin/pip" install --quiet "${HAILORT_WHEEL_URL}"
+    if [[ -f "${HAILORT_WHEEL_SOURCE}" ]]; then
+        log "Installing local HailoRT wheel ${HAILORT_WHEEL_SOURCE} into venv"
+    elif [[ "${HAILORT_WHEEL_SOURCE}" =~ ^https?:// ]]; then
+        log "Installing HailoRT wheel ${HAILORT_WHEEL_SOURCE} into venv"
+    else
+        error "HAILORT_WHEEL_SOURCE must be an existing wheel file or an HTTP(S) URL: ${HAILORT_WHEEL_SOURCE}"
+        exit 1
+    fi
+    "${SERVICE_DIR}/venv/bin/pip" install --quiet "${HAILORT_WHEEL_SOURCE}"
     if ! "${SERVICE_DIR}/venv/bin/python3" -c "import hailo_platform" >/dev/null 2>&1; then
         error "HailoRT Python bindings are not importable from the manager venv after wheel installation."
-        error "Check that this Pi's Python ABI matches the configured wheel: ${HAILORT_WHEEL_URL}"
+        error "Check that this Pi's Python ABI and architecture match the configured wheel: ${HAILORT_WHEEL_SOURCE}"
         exit 1
     fi
     chown -R root:root "${SERVICE_DIR}/venv"
