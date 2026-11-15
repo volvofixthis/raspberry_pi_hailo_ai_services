@@ -17,6 +17,7 @@ Environment=HAILO_DEVICE_SOCKET=/run/hailo/device.sock
 EnvironmentFile=-/etc/hailo/hailo-llm.env
 
 ExecStart=/opt/hailo-llm/venv/bin/python3 /opt/hailo-llm/hailo_llm_server.py
+ExecStartPre=/opt/hailo-llm/venv/bin/python3 /opt/hailo-llm/render_config.py --input /etc/hailo/hailo-llm.yaml --output /etc/xdg/hailo-llm/hailo-llm.json
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

@@ -15,7 +15,7 @@ cd system_services/hailo-llm
 sudo ./install.sh
 ```
 
-The installer creates a service account, virtual environment, systemd unit, and YAML-to-JSON configuration. It does not download model artifacts. Put each HEF at the path configured in `/etc/hailo/hailo-llm.yaml`.
+The installer creates a service account, virtual environment, systemd unit, and YAML-to-JSON configuration. It does not download model artifacts. Put each HEF at the path configured in `/etc/hailo/hailo-llm.yaml`; use `/var/lib/hailo-llm/models` rather than `/home/pi`, which the service sandbox cannot access.
 
 ```bash
 sudo systemctl status hailo-llm
@@ -58,7 +58,7 @@ device_manager:
 
 The global `NPU_MAX_GENERATED_TOKENS` environment variable overrides the global YAML `generation.max_tokens` default; model-specific settings override that default, and request fields override model defaults. The limit is validated against the model's runtime context capacity together with the estimated prompt size. A positive temperature enables sampling in the GenAI LLM API; zero disables it.
 
-After editing YAML, restart the service to re-render and load the configuration:
+After editing YAML, restart the service. Its systemd unit re-renders JSON from the YAML before each start:
 
 ```bash
 sudo systemctl restart hailo-llm

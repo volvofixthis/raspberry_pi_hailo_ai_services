@@ -102,6 +102,8 @@ EOF
         chmod 0644 "${ENV_FILE}"
     fi
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${DATA_DIR}"
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${ETC_XDG_DIR}"
+    chmod 0750 "${ETC_XDG_DIR}"
     chown -R root:root "${SERVICE_DIR}"
     chmod 0755 "${SERVICE_DIR}/hailo_llm_server.py"
 }
@@ -116,7 +118,7 @@ render_config() {
         --input "${ETC_HAILO_CONFIG}" --output "${JSON_CONFIG}"
     chown root:"${SERVICE_GROUP}" "${ETC_HAILO_CONFIG}"
     chmod 0640 "${ETC_HAILO_CONFIG}"
-    chown root:"${SERVICE_GROUP}" "${JSON_CONFIG}"
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${JSON_CONFIG}"
     chmod 0640 "${JSON_CONFIG}"
 }
 
