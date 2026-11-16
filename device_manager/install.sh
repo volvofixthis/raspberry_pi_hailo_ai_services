@@ -153,10 +153,11 @@ create_state_directories() {
     chown "${SERVICE_USER}:${SERVICE_GROUP}" /var/lib/hailo-device-manager
     chmod u+rwX,g+rX,o-rwx /var/lib/hailo-device-manager
     
-    # Runtime socket directory will be created by systemd
-    # but we pre-create it here to set permissions
+    # systemd also declares RuntimeDirectory=hailo. Keep a pre-existing
+    # directory writable by the manager so asyncio can unlink its socket on
+    # shutdown/restart.
     mkdir -p /run/hailo
-    chown root:root /run/hailo
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" /run/hailo
     chmod 0755 /run/hailo
 }
 

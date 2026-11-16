@@ -83,7 +83,7 @@ This will:
 1. Create system user `hailo-device-mgr`
 2. Set up Python virtual environment
 3. Install systemd service
-4. Create socket at `/run/hailo/device.sock`
+4. Create manager-owned runtime directory and socket at `/run/hailo/device.sock`
 5. Enable and start the service
 
 It also writes `/etc/hailo/device-manager.env` for optional overrides
