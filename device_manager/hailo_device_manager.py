@@ -1654,6 +1654,11 @@ class HailoDeviceManager:
         )
 
     @staticmethod
+    def _is_internal_failure(exc: Exception) -> bool:
+        message = str(exc).strip().upper()
+        return message in {"8", "HAILO_INTERNAL_FAILURE"} or "HAILO_INTERNAL_FAILURE(8)" in message
+
+    @staticmethod
     def _is_runtime_context_failure(exc: Exception) -> bool:
         message = str(exc).strip().upper()
         return (
@@ -1768,6 +1773,8 @@ class HailoDeviceManager:
         reset_attempted = False
         runtime_retry_attempted = False
         aggressive_sweep_done = False
+        kv_cache_conflict_seen = False
+        kv_cache_runtime_reset_attempted = False
         while True:
             ensure_error = self._ensure_runtime_context()
             if ensure_error:
@@ -1887,6 +1894,7 @@ class HailoDeviceManager:
                     logger.error("Failed to load model %s: %s", model_path, e)
                     return {"error": f"Failed to load model: {e}"}
                 elif self._is_genai_kv_cache_conflict(e, model_type) and evictions < eviction_limit:
+                    kv_cache_conflict_seen = True
                     event_reason = (
                         "GenAI KV-Cache conflict while loading "
                         f"{Path(model_path).name} ({model_type})"
@@ -1903,12 +1911,55 @@ class HailoDeviceManager:
                             evicted,
                         )
                         continue
+                    if not kv_cache_runtime_reset_attempted:
+                        kv_cache_runtime_reset_attempted = True
+                        logger.warning(
+                            "GenAI KV-Cache conflict persists with no cached GenAI models; "
+                            "resetting the manager runtime and retrying %s",
+                            model_path,
+                        )
+                        try:
+                            self._reset_runtime_context()
+                        except Exception as reset_error:
+                            self._record_capacity_event(
+                                f"{event_reason}; runtime reset failed: {reset_error}",
+                                model_path,
+                            )
+                            logger.error(
+                                "Failed to reset manager runtime after KV-Cache conflict: %s",
+                                reset_error,
+                            )
+                            return {"error": f"GenAI KV-Cache conflict and runtime reset failed: {reset_error}"}
+                        continue
                     logger.error(
                         "KV-Cache unavailable loading %s and no cached GenAI model can be evicted: %s",
                         model_path,
                         e,
                     )
                     return {"error": f"GenAI KV-Cache unavailable: {e}"}
+                elif (
+                    kv_cache_conflict_seen
+                    and not kv_cache_runtime_reset_attempted
+                    and self._is_internal_failure(e)
+                ):
+                    kv_cache_runtime_reset_attempted = True
+                    logger.warning(
+                        "GenAI model load failed with an internal error after KV-Cache eviction; "
+                        "resetting the manager runtime and retrying %s",
+                        model_path,
+                    )
+                    try:
+                        self._reset_runtime_context()
+                    except Exception as reset_error:
+                        self._record_capacity_event(
+                            f"KV-Cache recovery reset failed: {reset_error}", model_path
+                        )
+                        logger.error(
+                            "Failed to reset manager runtime after KV-Cache conflict: %s",
+                            reset_error,
+                        )
+                        return {"error": f"KV-Cache recovery reset failed: {reset_error}"}
+                    continue
                 else:
                     logger.error("Failed to load model %s: %s", model_path, e)
                     return {"error": f"Failed to load model: {e}"}

@@ -48,8 +48,10 @@ This will:
 - Start and enable the service
 
 Whisper inference runs through `hailo-device-manager`. When another GenAI model
-needs the shared KV-cache, the manager may evict Whisper's cached runtime; the
-next transcription request will load it again and may take longer.
+needs the shared KV-cache, the manager may evict Whisper's cached runtime; if a
+cache conflict persists, it rebuilds the VDevice runtime in-process and clears
+all cached models without restarting the manager service. The next transcription
+request loads Whisper again and may take longer.
 
 ### Installation with Model Warmup
 
