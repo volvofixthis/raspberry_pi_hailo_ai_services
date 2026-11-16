@@ -155,7 +155,7 @@ class LlmHandlerTests(unittest.TestCase):
         self.assertEqual(list(self.handler.stream(llm, {"prompt": "prompt"})), ["hello", "world"])
         self.assertEqual(llm.clear_count, 2)
 
-    def test_manager_keeps_distinct_llm_artifacts_and_unloads_selected_model(self):
+    def test_manager_switches_between_llm_artifacts_and_releases_previous_model(self):
         manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
         manager.device = types.SimpleNamespace(device_id="fake-device")
         manager.vdevice = object()
@@ -171,7 +171,8 @@ class LlmHandlerTests(unittest.TestCase):
 
             self.assertEqual(first["model_info"]["context_capacity"], 2048)
             self.assertEqual(second["model_info"]["prompt_template"], "{{ messages }}")
-            self.assertEqual(len(manager.loaded_models), 2)
+            self.assertEqual(len(manager.loaded_models), 1)
+            self.assertTrue(FakeLLM.instances[-2].released)
 
             manager._unload_model({"model_type": "llm", "model_path": str(first_path)})
 
@@ -179,7 +180,7 @@ class LlmHandlerTests(unittest.TestCase):
             self.assertTrue(FakeLLM.instances[-2].released)
             self.assertFalse(FakeLLM.instances[-1].released)
 
-    def test_same_artifact_with_distinct_loras_has_separate_runtime_entries(self):
+    def test_switching_same_artifact_with_distinct_loras_releases_previous_entry(self):
         manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
         manager.device = types.SimpleNamespace(device_id="fake-device")
         manager.vdevice = object()
@@ -193,11 +194,12 @@ class LlmHandlerTests(unittest.TestCase):
                 {"model_type": "llm", "model_path": str(model_path), "model_params": {"lora_name": "second"}}
             )
 
-            self.assertEqual(len(manager.loaded_models), 2)
+            self.assertEqual(len(manager.loaded_models), 1)
+            self.assertTrue(FakeLLM.instances[-2].released)
             self.assertEqual(FakeLLM.instances[-2].kwargs, {"lora_name": "first"})
             self.assertEqual(FakeLLM.instances[-1].kwargs, {"lora_name": "second"})
 
-    def test_llm_load_evicts_cached_whisper_after_kv_cache_conflict(self):
+    def test_llm_load_evicts_cached_whisper_before_constructing_model(self):
         manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
         manager.device = types.SimpleNamespace(device_id="fake-device")
         manager.vdevice = object()
@@ -222,8 +224,7 @@ class LlmHandlerTests(unittest.TestCase):
             def load_llm(vdevice, model_path, **kwargs):
                 nonlocal attempts
                 attempts += 1
-                if attempts == 1:
-                    raise RuntimeError("HAILO_INVALID_OPERATION(6): KV-Cache unavailable")
+                self.assertNotIn(whisper_key, manager.loaded_models)
                 return FakeLLM(vdevice, model_path, **kwargs)
 
             self.manager_module.LLM = load_llm
@@ -235,12 +236,12 @@ class LlmHandlerTests(unittest.TestCase):
                 self.manager_module.LLM = original_llm
 
             self.assertEqual(response["status"], "ok")
-            self.assertEqual(attempts, 2)
+            self.assertEqual(attempts, 1)
             self.assertTrue(whisper.released)
             self.assertNotIn(whisper_key, manager.loaded_models)
             self.assertIn(manager._model_key("llm", str(llm_path)), manager.loaded_models)
 
-    def test_persistent_kv_cache_conflict_resets_runtime_then_retries(self):
+    def test_internal_failure_after_genai_eviction_resets_runtime_then_retries(self):
         manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
         manager.device = types.SimpleNamespace(device_id="fake-device")
         manager.vdevice = object()
@@ -266,8 +267,6 @@ class LlmHandlerTests(unittest.TestCase):
                 nonlocal attempts
                 attempts += 1
                 if attempts == 1:
-                    raise RuntimeError("HAILO_INVALID_OPERATION(6): KV-Cache unavailable")
-                if attempts == 2:
                     raise RuntimeError("HAILO_INTERNAL_FAILURE(8)")
                 return FakeLLM(vdevice, model_path, **kwargs)
 
@@ -286,7 +285,7 @@ class LlmHandlerTests(unittest.TestCase):
                 self.manager_module.LLM = original_llm
 
             self.assertEqual(response["status"], "ok")
-            self.assertEqual(attempts, 3)
+            self.assertEqual(attempts, 2)
             self.assertEqual(reset_count, 1)
             self.assertEqual(len(manager.loaded_models), 1)
             self.assertIn(manager._model_key("llm", str(llm_path)), manager.loaded_models)

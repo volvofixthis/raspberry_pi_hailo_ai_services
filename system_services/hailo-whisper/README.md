@@ -47,11 +47,12 @@ This will:
 - Download Whisper resources into `/var/lib/hailo-whisper/resources`
 - Start and enable the service
 
-Whisper inference runs through `hailo-device-manager`. When another GenAI model
-needs the shared KV-cache, the manager may evict Whisper's cached runtime; if a
-cache conflict persists, it rebuilds the VDevice runtime in-process and clears
-all cached models without restarting the manager service. The next transcription
-request loads Whisper again and may take longer.
+Whisper inference runs through `hailo-device-manager`. On the current HailoRT
+stack, Whisper, LLM, and VLM models share one GenAI KV-cache slot. When another
+GenAI model is requested, the manager unloads Whisper's cached runtime first;
+the next transcription request loads it again and may take longer. If a cache
+conflict persists, the manager rebuilds the VDevice runtime in-process, without
+restarting the manager service.
 
 ### Installation with Model Warmup
 
