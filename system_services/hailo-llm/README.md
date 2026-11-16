@@ -64,7 +64,7 @@ After editing YAML, restart the service. Its systemd unit re-renders JSON from t
 sudo systemctl restart hailo-llm
 ```
 
-Models load on demand through the manager. HailoRT 5.3 allows only one GenAI KV-cache holder at a time, so switching between LLM, Whisper, or VLM models unloads the previously cached GenAI model before the new one is loaded. This adds model-load latency; the previous service reloads its model on its next inference. If the KV-cache remains unavailable after eviction, the manager rebuilds its VDevice runtime in-process and retries without restarting the manager service; this unloads all cached models, which reload on demand.
+Models load on demand through the manager and remain cached for reuse when possible. If a GenAI KV-cache conflict occurs, the manager evicts the least-recently-used cached GenAI model and retries. If the runtime still reports a cache/internal failure, it rebuilds the VDevice runtime in-process and retries without restarting the manager service; this unloads all cached models, which reload on demand.
 
 ## OpenAI API
 

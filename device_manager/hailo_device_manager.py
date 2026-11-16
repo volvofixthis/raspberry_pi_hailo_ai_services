@@ -1775,30 +1775,6 @@ class HailoDeviceManager:
         aggressive_sweep_done = False
         kv_cache_conflict_seen = False
         kv_cache_runtime_reset_attempted = False
-        genai_model_evicted = False
-
-        if model_type in GENAI_MODEL_TYPES:
-            handoff_reason = (
-                f"KV-cache handoff to {Path(model_path).name} ({model_type})"
-            )
-            while any(
-                entry.model_type in GENAI_MODEL_TYPES
-                for entry in self.loaded_models.values()
-            ):
-                evicted = self._evict_lru(
-                    reason=handoff_reason,
-                    model_types=GENAI_MODEL_TYPES,
-                )
-                if evicted is None:
-                    break
-                evictions += 1
-                genai_model_evicted = True
-                logger.info(
-                    "Unloaded cached GenAI model %s before loading %s to reserve the shared KV-Cache",
-                    evicted,
-                    model_path,
-                )
-
         while True:
             ensure_error = self._ensure_runtime_context()
             if ensure_error:
@@ -1962,7 +1938,7 @@ class HailoDeviceManager:
                     )
                     return {"error": f"GenAI KV-Cache unavailable: {e}"}
                 elif (
-                    (kv_cache_conflict_seen or genai_model_evicted)
+                    kv_cache_conflict_seen
                     and not kv_cache_runtime_reset_attempted
                     and self._is_internal_failure(e)
                 ):
