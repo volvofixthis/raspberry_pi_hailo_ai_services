@@ -64,7 +64,7 @@ After editing YAML, restart the service. Its systemd unit re-renders JSON from t
 sudo systemctl restart hailo-llm
 ```
 
-Models load on demand through the manager. The manager reuses resident models when possible and may evict least-recently-used models when Hailo memory is constrained; loading an evicted model adds latency.
+Models load on demand through the manager. The manager reuses resident models when possible and may evict least-recently-used models when Hailo memory is constrained or another GenAI model (such as Whisper) holds the HailoRT KV-cache. Loading an evicted model adds latency; the other service reloads its model on its next inference.
 
 ## OpenAI API
 

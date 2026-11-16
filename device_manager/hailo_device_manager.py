@@ -81,6 +81,7 @@ DEFAULT_SOCKET_MODE = 0o660
 DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 # Maximum LRU evictions attempted before giving up on a load_model request.
 DEFAULT_MAX_EVICTIONS = 3
+GENAI_MODEL_TYPES = frozenset({"vlm", "vlm_chat", "llm", "whisper"})
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -1642,6 +1643,17 @@ class HailoDeviceManager:
         )
 
     @staticmethod
+    def _is_genai_kv_cache_conflict(exc: Exception, model_type: str) -> bool:
+        if model_type not in GENAI_MODEL_TYPES:
+            return False
+        message = str(exc).strip().upper()
+        return (
+            "KV-CACHE" in message
+            or message in {"6", "HAILO_INVALID_OPERATION"}
+            or "HAILO_INVALID_OPERATION(6)" in message
+        )
+
+    @staticmethod
     def _is_runtime_context_failure(exc: Exception) -> bool:
         message = str(exc).strip().upper()
         return (
@@ -1671,15 +1683,24 @@ class HailoDeviceManager:
             return False
         return True
 
-    def _evict_lru(self, reason: Optional[str] = None) -> Optional[str]:
+    def _evict_lru(
+        self,
+        reason: Optional[str] = None,
+        model_types: Optional[set[str] | frozenset[str]] = None,
+    ) -> Optional[str]:
         """Unload the least-recently-used model from VRAM.
 
         Returns the evicted model key, or None if the registry is empty.
         """
-        if not self.loaded_models:
+        candidates = {
+            key: entry
+            for key, entry in self.loaded_models.items()
+            if model_types is None or entry.model_type in model_types
+        }
+        if not candidates:
             return None
 
-        lru_key = min(self.loaded_models, key=lambda k: self.loaded_models[k].last_used)
+        lru_key = min(candidates, key=lambda key: candidates[key].last_used)
         entry = self.loaded_models.pop(lru_key)
 
         try:
@@ -1865,6 +1886,29 @@ class HailoDeviceManager:
                         )
                     logger.error("Failed to load model %s: %s", model_path, e)
                     return {"error": f"Failed to load model: {e}"}
+                elif self._is_genai_kv_cache_conflict(e, model_type) and evictions < eviction_limit:
+                    event_reason = (
+                        "GenAI KV-Cache conflict while loading "
+                        f"{Path(model_path).name} ({model_type})"
+                    )
+                    evicted = self._evict_lru(
+                        reason=event_reason,
+                        model_types=GENAI_MODEL_TYPES,
+                    )
+                    if evicted is not None:
+                        evictions += 1
+                        logger.warning(
+                            "KV-Cache unavailable loading %s - evicted cached GenAI model %s; retrying",
+                            model_path,
+                            evicted,
+                        )
+                        continue
+                    logger.error(
+                        "KV-Cache unavailable loading %s and no cached GenAI model can be evicted: %s",
+                        model_path,
+                        e,
+                    )
+                    return {"error": f"GenAI KV-Cache unavailable: {e}"}
                 else:
                     logger.error("Failed to load model %s: %s", model_path, e)
                     return {"error": f"Failed to load model: {e}"}

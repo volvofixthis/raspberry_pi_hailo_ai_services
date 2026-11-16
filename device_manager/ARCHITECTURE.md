@@ -65,6 +65,7 @@ connect via Unix socket and submit JSON requests.
 - Cache key: `model_type:model_path` (LLM entries also include model parameters such as LoRA selection)
 - Cache entries track load time and last use
 - Load-on-demand for `infer` if not present
+- GenAI model families (`llm`, `whisper`, `vlm`, `vlm_chat`) can contend for HailoRT's KV-cache guard; on a KV-cache acquisition conflict the manager evicts the least-recently-used cached GenAI model and retries the requested load
 
 ### Model Handlers
 

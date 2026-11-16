@@ -197,6 +197,49 @@ class LlmHandlerTests(unittest.TestCase):
             self.assertEqual(FakeLLM.instances[-2].kwargs, {"lora_name": "first"})
             self.assertEqual(FakeLLM.instances[-1].kwargs, {"lora_name": "second"})
 
+    def test_llm_load_evicts_cached_whisper_after_kv_cache_conflict(self):
+        manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
+        manager.device = types.SimpleNamespace(device_id="fake-device")
+        manager.vdevice = object()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            whisper_path = Path(temp_dir) / "Whisper-Base.hef"
+            llm_path = Path(temp_dir) / "Qwen.hef"
+            whisper_path.touch()
+            llm_path.touch()
+            whisper = FakeLLM(manager.vdevice, str(whisper_path))
+            whisper_key = manager._model_key("whisper", str(whisper_path))
+            manager.loaded_models[whisper_key] = self.manager_module.ModelEntry(
+                model_type="whisper",
+                model_path=str(whisper_path),
+                model=whisper,
+                loaded_at=1.0,
+                last_used=1.0,
+            )
+
+            attempts = 0
+            original_llm = self.manager_module.LLM
+
+            def load_llm(vdevice, model_path, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("HAILO_INVALID_OPERATION(6): KV-Cache unavailable")
+                return FakeLLM(vdevice, model_path, **kwargs)
+
+            self.manager_module.LLM = load_llm
+            try:
+                response = manager._load_model(
+                    {"model_type": "llm", "model_path": str(llm_path)}
+                )
+            finally:
+                self.manager_module.LLM = original_llm
+
+            self.assertEqual(response["status"], "ok")
+            self.assertEqual(attempts, 2)
+            self.assertTrue(whisper.released)
+            self.assertNotIn(whisper_key, manager.loaded_models)
+            self.assertIn(manager._model_key("llm", str(llm_path)), manager.loaded_models)
+
     def test_manager_metadata_and_context_actions(self):
         manager = self.manager_module.HailoDeviceManager("/tmp/test-device.sock")
         model_path = "/models/qwen.hef"

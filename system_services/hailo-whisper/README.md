@@ -47,6 +47,10 @@ This will:
 - Download Whisper resources into `/var/lib/hailo-whisper/resources`
 - Start and enable the service
 
+Whisper inference runs through `hailo-device-manager`. When another GenAI model
+needs the shared KV-cache, the manager may evict Whisper's cached runtime; the
+next transcription request will load it again and may take longer.
+
 ### Installation with Model Warmup
 
 ```bash
