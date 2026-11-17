@@ -246,12 +246,24 @@ class LLMApiService:
         except Exception as exc:
             raise APIError(400, f"could not render the model prompt template: {exc}", "invalid_request_error") from exc
 
-    def _prepare_request(self, payload: Any) -> tuple[ModelConfig, list[dict[str, Any]], list[dict[str, Any]], str, int, float, bool]:
+    def _prepare_request(
+        self, payload: Any
+    ) -> tuple[
+        ModelConfig,
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        str,
+        int,
+        float,
+        bool,
+        float | None,
+        int | None,
+    ]:
         if not isinstance(payload, dict):
             raise APIError(400, "request body must be a JSON object", "invalid_request_error")
         supported = {
             "model", "messages", "stream", "max_tokens", "max_completion_tokens",
-            "temperature", "tools", "tool_choice",
+            "temperature", "top_p", "top_k", "tools", "tool_choice",
         }
         unknown = set(payload) - supported
         if unknown:
@@ -277,9 +289,23 @@ class LLMApiService:
         temperature = payload.get("temperature", model.generation.get("temperature", 0.0))
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= float(temperature) <= 2:
             raise APIError(400, "temperature must be a number from 0 to 2", "invalid_request_error")
+        top_p = payload.get("top_p", model.generation.get("top_p"))
+        if "top_p" in payload and top_p is None:
+            raise APIError(400, "top_p must be a number greater than 0 and at most 1", "invalid_request_error")
+        if top_p is not None and (
+            isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or not 0 < float(top_p) <= 1
+        ):
+            raise APIError(400, "top_p must be a number greater than 0 and at most 1", "invalid_request_error")
+        top_k = payload.get("top_k", model.generation.get("top_k"))
+        if "top_k" in payload and top_k is None:
+            raise APIError(400, "top_k must be a positive integer", "invalid_request_error")
+        if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1):
+            raise APIError(400, "top_k must be a positive integer", "invalid_request_error")
         do_sample = model.generation.get("do_sample", float(temperature) > 0)
         if "temperature" in payload:
             do_sample = float(temperature) > 0
+        elif "top_p" in payload or "top_k" in payload:
+            do_sample = True
         if not isinstance(payload.get("stream", False), bool):
             raise APIError(400, "stream must be a boolean", "invalid_request_error")
 
@@ -296,7 +322,10 @@ class LLMApiService:
                 "invalid_request_error",
                 "context_length_exceeded",
             )
-        return model, messages, tools, prompt, max_tokens, float(temperature), bool(do_sample)
+        return (
+            model, messages, tools, prompt, max_tokens, float(temperature), bool(do_sample),
+            None if top_p is None else float(top_p), top_k,
+        )
 
     async def chat(
         self, payload: Any, http_request: web.Request | None = None
@@ -314,7 +343,10 @@ class LLMApiService:
             raise _error_from_manager(exc) from exc
         # Resolve all request values after loading metadata needed by the HEF template.
         try:
-            prepared_model, messages, tools, prompt, max_tokens, temperature, do_sample = self._prepare_request(payload)
+            (
+                prepared_model, messages, tools, prompt, max_tokens, temperature, do_sample,
+                top_p, top_k,
+            ) = self._prepare_request(payload)
         except APIError as exc:
             if exc.code == "model_metadata_unavailable":
                 raise APIError(503, "model metadata is unavailable", "server_error", "model_metadata_unavailable") from exc
@@ -326,6 +358,8 @@ class LLMApiService:
             "max_generated_tokens": max_tokens,
             "temperature": temperature,
             "do_sample": do_sample,
+            "top_p": top_p,
+            "top_k": top_k,
         }
         tools_requested = bool(tools)
         declared_names = {

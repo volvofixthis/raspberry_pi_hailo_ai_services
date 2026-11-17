@@ -37,6 +37,9 @@ default_model: qwen2.5-1.5b
 generation:
   max_tokens: 128
   temperature: 0.0
+  # Optional sampling filters; omitted values use the GenAI runtime defaults.
+  # top_p: 0.9
+  # top_k: 40
 
 models:
   qwen2.5-1.5b:
@@ -50,13 +53,15 @@ models:
     generation:
       max_tokens: 256
       temperature: 0.2
+      # top_p: 0.9
+      # top_k: 40
 
 device_manager:
   status_url: http://127.0.0.1:5099/v1/device/status
   timeout_s: 120
 ```
 
-The global `NPU_MAX_GENERATED_TOKENS` environment variable overrides the global YAML `generation.max_tokens` default; model-specific settings override that default, and request fields override model defaults. The limit is validated against the model's runtime context capacity together with the estimated prompt size. A positive temperature enables sampling in the GenAI LLM API; zero disables it.
+The global `NPU_MAX_GENERATED_TOKENS` environment variable overrides the global YAML `generation.max_tokens` default; model-specific settings override that default, and request fields override model defaults. The limit is validated against the model's runtime context capacity together with the estimated prompt size. A positive temperature is passed to GenAI and enables sampling; zero disables sampling. `top_p` and `top_k` may be set in YAML or per request. Setting either in a request enables sampling unless the same request explicitly sets `temperature` to zero. If omitted, the GenAI runtime's defaults are used.
 
 After editing YAML, restart the service. Its systemd unit re-renders JSON from the YAML before each start:
 
@@ -131,7 +136,7 @@ Context clearing is serialized with inference and does not unload model weights.
 - Unknown model IDs and unsupported request fields return structured 4xx errors.
 - Context overflow returns HTTP 400 with `context_length_exceeded`.
 - Device-manager, model-load, and inference failures return structured 503 errors.
-- Supported message content is text. Supported generation fields are `max_tokens`/`max_completion_tokens` and `temperature`; other OpenAI request fields are rejected.
+- Supported message content is text. Supported generation fields are `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, and `top_k`; other OpenAI request fields are rejected.
 - Only one model inference runs at a time across all manager clients. Requests queue; model switching may trigger LRU eviction and reload.
 
 See [API_SPEC.md](API_SPEC.md) for the endpoint contract.

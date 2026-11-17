@@ -271,8 +271,13 @@ class LlmHandler(ModelHandler):
         if "do_sample" in input_data:
             kwargs["do_sample"] = bool(input_data["do_sample"])
         elif input_data.get("temperature") is not None:
-            # The supported GenAI LLM API exposes sampling as a boolean.
             kwargs["do_sample"] = float(input_data["temperature"]) > 0
+        temperature = input_data.get("temperature")
+        if temperature is not None and float(temperature) > 0:
+            kwargs["temperature"] = float(temperature)
+        for name in ("top_p", "top_k"):
+            if input_data.get(name) is not None:
+                kwargs[name] = input_data[name]
         return kwargs
 
     @staticmethod

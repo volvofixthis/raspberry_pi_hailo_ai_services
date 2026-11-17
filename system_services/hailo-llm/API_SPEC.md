@@ -30,11 +30,13 @@ Supported request fields:
 | `stream` | Optional boolean, default `false` |
 | `max_tokens` | Optional output-token limit, defaulted from selected model config |
 | `max_completion_tokens` | Alias for `max_tokens`; do not supply both |
-| `temperature` | Optional value 0–2; positive enables sampling, zero disables it |
+| `temperature` | Optional value 0–2; positive values are passed to GenAI and enable sampling, zero disables sampling |
+| `top_p` | Optional nucleus-sampling value greater than 0 and at most 1; supplying it enables sampling unless `temperature: 0` is also supplied |
+| `top_k` | Optional positive integer; supplying it enables sampling unless `temperature: 0` is also supplied |
 | `tools` | Optional OpenAI function definitions; model must have `supports_tools: true` |
 | `tool_choice` | Optional `auto` or `none` |
 
-Unsupported fields and non-text content return `400 invalid_request_error`. Unknown model IDs return `404` with code `model_not_found`. Prompt estimate plus requested output tokens must fit the model's runtime context capacity; otherwise the service returns `400 context_length_exceeded`.
+Sampling parameters may also be set in global or per-model `generation` config. If `top_p` and `top_k` are omitted, the GenAI runtime's defaults apply. Unsupported fields and non-text content return `400 invalid_request_error`. Unknown model IDs return `404` with code `model_not_found`. Prompt estimate plus requested output tokens must fit the model's runtime context capacity; otherwise the service returns `400 context_length_exceeded`.
 
 ### Non-streaming response
 

@@ -139,15 +139,39 @@ class LlmHandlerTests(unittest.TestCase):
 
         result = self.handler.infer(
             llm,
-            {"prompt": "rendered prompt", "max_generated_tokens": 128, "temperature": 0.7},
+            {
+                "prompt": "rendered prompt",
+                "max_generated_tokens": 128,
+                "temperature": 0.7,
+                "do_sample": True,
+                "top_p": 0.85,
+                "top_k": 40,
+            },
         )
 
         self.assertEqual(result, {"text": "generated text", "context_used": 17, "context_capacity": 2048})
         self.assertEqual(llm.clear_count, 2)
         self.assertEqual(
             llm.calls,
-            [("rendered prompt", {"max_generated_tokens": 128, "do_sample": True})],
+            [(
+                "rendered prompt",
+                {
+                    "max_generated_tokens": 128,
+                    "do_sample": True,
+                    "temperature": 0.7,
+                    "top_p": 0.85,
+                    "top_k": 40,
+                },
+            )],
         )
+
+    def test_zero_temperature_disables_sampling_without_passing_zero_temperature(self):
+        llm = FakeLLM(object(), "/models/qwen.hef")
+        self.handler.infer(
+            llm,
+            {"prompt": "prompt", "temperature": 0.0, "do_sample": False},
+        )
+        self.assertEqual(llm.calls[0][1], {"do_sample": False})
 
     def test_stream_filters_stop_tokens_and_clears_context(self):
         llm = FakeLLM(object(), "/models/qwen.hef")

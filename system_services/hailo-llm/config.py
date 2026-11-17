@@ -85,10 +85,21 @@ def _validate_generation(value: Any, name: str) -> dict[str, Any]:
         if not 0 <= float(temperature) <= 2:
             raise ValueError(f"{name}.temperature must be a number from 0 to 2")
         result["temperature"] = float(temperature)
+    top_p = result.get("top_p")
+    if top_p is not None:
+        if isinstance(top_p, bool) or not isinstance(top_p, (int, float)):
+            raise ValueError(f"{name}.top_p must be a number greater than 0 and at most 1")
+        if not 0 < float(top_p) <= 1:
+            raise ValueError(f"{name}.top_p must be a number greater than 0 and at most 1")
+        result["top_p"] = float(top_p)
+    top_k = result.get("top_k")
+    if top_k is not None:
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise ValueError(f"{name}.top_k must be a positive integer")
     do_sample = result.get("do_sample")
     if do_sample is not None and not isinstance(do_sample, bool):
         raise ValueError(f"{name}.do_sample must be a boolean")
-    unsupported = set(result) - {"max_tokens", "temperature", "do_sample"}
+    unsupported = set(result) - {"max_tokens", "temperature", "top_p", "top_k", "do_sample"}
     if unsupported:
         raise ValueError(f"{name} contains unsupported settings: {', '.join(sorted(unsupported))}")
     return result
@@ -120,7 +131,12 @@ def validate_config(raw: Any) -> ServiceConfig:
         global_generation["max_tokens"] = env_value
     global_generation.setdefault("max_tokens", 512)
     global_generation.setdefault("temperature", 0.0)
-    global_generation.setdefault("do_sample", global_generation["temperature"] > 0)
+    global_generation.setdefault(
+        "do_sample",
+        global_generation["temperature"] > 0
+        or global_generation.get("top_p") is not None
+        or global_generation.get("top_k") is not None,
+    )
 
     models: dict[str, ModelConfig] = {}
     for model_id, raw_model in raw_models.items():
@@ -145,8 +161,14 @@ def validate_config(raw: Any) -> ServiceConfig:
         )
         generation = dict(global_generation)
         generation.update(model_generation)
-        if "temperature" in model_generation and "do_sample" not in model_generation:
-            generation["do_sample"] = generation["temperature"] > 0
+        if "do_sample" not in model_generation and (
+            "temperature" in model_generation or "top_p" in model_generation or "top_k" in model_generation
+        ):
+            generation["do_sample"] = (
+                generation["temperature"] > 0
+                or generation.get("top_p") is not None
+                or generation.get("top_k") is not None
+            )
         models[model_id] = ModelConfig(
             model_id=model_id,
             hef_path=hef_path,

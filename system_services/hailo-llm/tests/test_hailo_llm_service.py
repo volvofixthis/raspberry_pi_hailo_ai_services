@@ -175,6 +175,8 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
                 "messages": [{"role": "user", "content": "hello"}],
                 "max_tokens": 9,
                 "temperature": 0.8,
+                "top_p": 0.85,
+                "top_k": 40,
             },
         )
         self.assertEqual(response.status, 200)
@@ -183,6 +185,45 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         input_data = self.manager.inferences[0][1]
         self.assertEqual(input_data["max_generated_tokens"], 9)
         self.assertTrue(input_data["do_sample"])
+        self.assertEqual(input_data["temperature"], 0.8)
+        self.assertEqual(input_data["top_p"], 0.85)
+        self.assertEqual(input_data["top_k"], 40)
+
+    async def test_top_p_or_top_k_request_enables_sampling_by_default(self):
+        response = await self.client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "top_k": 20,
+            },
+        )
+        self.assertEqual(response.status, 200)
+        input_data = self.manager.inferences[0][1]
+        self.assertTrue(input_data["do_sample"])
+        self.assertEqual(input_data["top_k"], 20)
+
+        response = await self.client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "top_p": 0.9,
+                "temperature": 0,
+            },
+        )
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self.manager.inferences[1][1]["do_sample"])
+
+    async def test_sampling_parameters_are_validated(self):
+        for setting in (
+            {"top_p": 0}, {"top_p": 1.1}, {"top_p": True}, {"top_p": None},
+            {"top_k": 0}, {"top_k": 1.5}, {"top_k": None},
+        ):
+            with self.subTest(setting=setting):
+                response = await self.client.post(
+                    "/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hello"}], **setting},
+                )
+                self.assertEqual(response.status, 400)
 
     async def test_unknown_model_and_unsupported_content_are_client_errors(self):
         unknown = await self.client.post(
@@ -314,6 +355,21 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_generation_config_accepts_and_validates_sampling_options(self):
+        configured = raw_config()
+        configured["generation"].update({"top_p": 0.9, "top_k": 50})
+        parsed = validate_config(configured)
+        self.assertEqual(parsed.models["small"].generation["top_p"], 0.9)
+        self.assertEqual(parsed.models["small"].generation["top_k"], 50)
+        self.assertTrue(parsed.models["small"].generation["do_sample"])
+
+        for setting in ({"top_p": 0}, {"top_p": 1.1}, {"top_k": 0}, {"top_k": True}):
+            with self.subTest(setting=setting):
+                invalid = raw_config()
+                invalid["generation"].update(setting)
+                with self.assertRaises(ValueError):
+                    validate_config(invalid)
+
     def test_rejects_duplicate_model_keys_and_invalid_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             yaml_path = Path(temp_dir) / "duplicate.yaml"
